@@ -1,0 +1,82 @@
+name: Build & Deploy to Cafe24 AI Hosting
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CICD_DEPLOY_URL: http://1.226.82.154:7001/cicd/deploy/legacy
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Deploy to Cafe24 AI Hosting
+        run: |
+          SITE_ID="${GITHUB_REPOSITORY##*/}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+
+          echo "Deploying ${SITE_ID} with image ${IMAGE}"
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "X-Deploy-Token: ${{ secrets.DEPLOY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"site_id\": \"${SITE_ID}\", \"image\": \"${IMAGE}\"}" \
+            "${{ env.CICD_DEPLOY_URL }}")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "Response: ${BODY}"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Deployment failed with HTTP ${HTTP_CODE}"
+            exit 1
+          fi
+
+          URL=$(echo "$BODY" | jq -r '.url')
+          echo "Deployed successfully!"
+          echo "Site URL: ${URL}"
+          echo "DEPLOY_URL=${URL}" >> $GITHUB_ENV
+
+      - name: Deployment Summary
+        run: |
+          echo "## Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Site URL:** ${{ env.DEPLOY_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
